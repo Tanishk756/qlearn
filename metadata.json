@@ -1,0 +1,6 @@
+{
+  "name": "Q-Learn Nexus",
+  "description": "AI-Powered Interactive Quantum Computing & Algorithm Learning Platform with visual circuit builder, mathematical simulator, Bloch sphere, Q-Nova AI tutor, and comprehensive curriculum.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

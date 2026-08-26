@@ -1,0 +1,87 @@
+name: Q-Learn Nexus Production CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    name: Typecheck, Build, Security & Quantum Verification
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: qlearn_nexus
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js Environment (v20)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Node Dependencies
+        run: npm ci
+
+      - name: Static Analysis & TypeScript Typechecking
+        run: npm run lint
+
+      - name: Production Bundle & Server Compilation
+        run: npm run build
+
+      - name: Setup Python Environment (3.11)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'quantum-worker/requirements.txt'
+
+      - name: Install Quantum Worker Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r quantum-worker/requirements.txt
+
+      - name: Run Quantum Worker Python Unit Tests
+        run: python quantum-worker/tests/test_worker.py
+
+      - name: Run Server Unit & Quantum Security Tests
+        env:
+          DATABASE_URL: postgresql://postgres:postgres_password@localhost:5432/qlearn_nexus
+          REDIS_URL: redis://localhost:6379
+        run: npx tsx server/src/tests/run_all_tests.ts
+
+      - name: Run Full End-to-End Quantum Integration & Isolation Audit
+        env:
+          DATABASE_URL: postgresql://postgres:postgres_password@localhost:5432/qlearn_nexus
+          REDIS_URL: redis://localhost:6379
+        run: npx tsx server/src/tests/e2e_quantum_audit.ts
+
+      - name: Build Quantum Worker Docker Container
+        run: |
+          docker build -t qlearn-nexus-worker:latest ./quantum-worker
