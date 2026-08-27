@@ -21,12 +21,12 @@ declare global {
  * 4. Local Development Fallback
  */
 export function getPoolConfig(): PoolConfig {
-  const connectionString = process.env.DATABASE_URL;
-
   const max = parseInt(process.env.DB_POOL_MAX || '20', 10);
   const idleTimeoutMillis = parseInt(process.env.DB_IDLE_TIMEOUT_MS || '30000', 10);
   const connectionTimeoutMillis = parseInt(process.env.DB_CONN_TIMEOUT_MS || '10000', 10);
 
+  // 1. Direct DATABASE_URL
+  const connectionString = process.env.DATABASE_URL;
   if (connectionString) {
     return {
       connectionString,
@@ -36,13 +36,32 @@ export function getPoolConfig(): PoolConfig {
     };
   }
 
-  // Cloud SQL Unix Domain Socket connection (Native Google Cloud Run integration)
-  const instanceConnectionName = process.env.INSTANCE_CONNECTION_NAME || process.env.CLOUD_SQL_INSTANCE;
-  const dbSocketPath = process.env.DB_SOCKET_PATH || (instanceConnectionName ? `/cloudsql/${instanceConnectionName}` : undefined);
-
   const user = process.env.DB_USER || process.env.SQL_USER || 'qlearn_app';
   const password = process.env.DB_PASSWORD || process.env.SQL_PASSWORD || process.env.DB_PASS;
   const database = process.env.DB_NAME || process.env.SQL_DB_NAME || 'qlearn_nexus';
+
+  // 2. Direct TCP / VPC Private IP (DB_HOST takes top precedence when set, such as 172.22.160.3)
+  if (process.env.DB_HOST || process.env.SQL_HOST) {
+    const host = process.env.DB_HOST || process.env.SQL_HOST || 'localhost';
+    const port = parseInt(process.env.DB_PORT || process.env.SQL_PORT || '5432', 10);
+    const ssl = process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined;
+
+    return {
+      host,
+      port,
+      user,
+      password,
+      database,
+      ssl,
+      max,
+      idleTimeoutMillis,
+      connectionTimeoutMillis,
+    };
+  }
+
+  // 3. Cloud SQL Unix Domain Socket (Used when DB_SOCKET_PATH is set or INSTANCE_CONNECTION_NAME without DB_HOST)
+  const instanceConnectionName = process.env.INSTANCE_CONNECTION_NAME || process.env.CLOUD_SQL_INSTANCE;
+  const dbSocketPath = process.env.DB_SOCKET_PATH || (instanceConnectionName ? `/cloudsql/${instanceConnectionName}` : undefined);
 
   if (dbSocketPath) {
     return {
@@ -56,21 +75,13 @@ export function getPoolConfig(): PoolConfig {
     };
   }
 
-  // TCP / VPC Private IP / Localhost connection
-  const host = process.env.DB_HOST || process.env.SQL_HOST || 'localhost';
-  const port = parseInt(process.env.DB_PORT || process.env.SQL_PORT || '5432', 10);
-
-  const ssl = process.env.DB_SSL === 'true' || process.env.NODE_ENV === 'production' && !host.includes('localhost') && !host.startsWith('127.') && !dbSocketPath
-    ? { rejectUnauthorized: false }
-    : undefined;
-
+  // 4. Default Localhost Fallback
   return {
-    host,
-    port,
+    host: 'localhost',
+    port: 5432,
     user,
     password,
     database,
-    ssl,
     max,
     idleTimeoutMillis,
     connectionTimeoutMillis,
@@ -80,7 +91,12 @@ export function getPoolConfig(): PoolConfig {
 /**
  * Creates or retrieves the singleton PostgreSQL connection pool.
  */
-export function getPool(): Pool {
+export function getPool(forceNew = false): Pool {
+  if (forceNew && global._postgresPool) {
+    global._postgresPool.end().catch(() => {});
+    global._postgresPool = undefined;
+  }
+
   if (!global._postgresPool) {
     const config = getPoolConfig();
     global._postgresPool = new Pool(config);
@@ -95,6 +111,17 @@ export function getPool(): Pool {
   }
 
   return global._postgresPool;
+}
+
+export async function resetPool(): Promise<void> {
+  if (global._postgresPool) {
+    try {
+      await global._postgresPool.end();
+    } catch {
+      // Ignore
+    }
+    global._postgresPool = undefined;
+  }
 }
 
 export const pool = getPool();

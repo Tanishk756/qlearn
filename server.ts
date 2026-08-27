@@ -8,14 +8,23 @@ import express from 'express';
 import path from 'path';
 import { createApp } from './server/src/app';
 import { createServer as createViteServer } from 'vite';
-import { closePool } from './server/src/database/client';
+import { closePool, checkDatabaseHealth, getPoolConfig } from './server/src/database/client';
 
 async function startServer() {
+  const isProduction = process.env.NODE_ENV === 'production';
+  console.log(`[Q-Learn Nexus Server] Starting in ${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'} mode...`);
+
+  if (isProduction) {
+    const config = getPoolConfig();
+    console.log(`[Q-Learn Nexus Server] PostgreSQL Target: host=${config.host || 'socket'}, port=${config.port || 5432}, database=${config.database}, user=${config.user}`);
+    console.log(`[Q-Learn Nexus Server] Local disk persistence: STRICTLY DISABLED.`);
+  }
+
   const app = createApp();
   const PORT = parseInt(process.env.PORT || '3000', 10);
 
   // Mount Vite development middleware or static production handler
-  if (process.env.NODE_ENV !== 'production') {
+  if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -30,8 +39,20 @@ async function startServer() {
   }
 
   const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Q-Learn Nexus Server] Running on port ${PORT}`);
-    console.log(`[Q-Learn Nexus Server] API Root: /api/v1`);
+    console.log(`[Q-Learn Nexus Server] Running on http://0.0.0.0:${PORT}`);
+    console.log(`[Q-Learn Nexus Server] Health endpoint: http://0.0.0.0:${PORT}/api/v1/health`);
+    console.log(`[Q-Learn Nexus Server] Readiness probe: http://0.0.0.0:${PORT}/api/v1/ready`);
+
+    // Verify database connection asynchronously
+    checkDatabaseHealth().then((health) => {
+      if (health.connected) {
+        console.log(`[PostgreSQL] Connection probe succeeded (latency: ${health.latencyMs}ms). Authoritative storage active.`);
+      } else {
+        console.warn(`[PostgreSQL] Warning: Database connection probe failed (${health.error || 'unreachable'}). Server operating in fail-closed degraded mode.`);
+      }
+    }).catch(() => {
+      console.warn(`[PostgreSQL] Warning: Database connection probe encountered error. Operating in fail-closed degraded mode.`);
+    });
   });
 
   // Graceful shutdown handling for Cloud Run container lifecycle

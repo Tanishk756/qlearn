@@ -96,11 +96,11 @@ The Node.js server uses `pg.Pool` with `drizzle-orm/node-postgres` in `server/sr
 
 ---
 
-## 6. Local Development Isolation
+## 6. Local Development Isolation & Production Fail-Closed Posture
 
-Local development is strictly decoupled from production Cloud SQL:
+- **Production (NODE_ENV=production)**: PostgreSQL is the SOLE persistence engine. All JSON fallbacks, automatic demo seeding, default ADMIN user creation, and file snapshotting are strictly disabled. If PostgreSQL is unreachable, the system fails closed with a 503 degraded error.
 - **Local PostgreSQL**: Developers run `docker compose up -d postgres` which starts PostgreSQL 16 on `localhost:5432`.
-- **Environment Fallback**: In local development without an active PostgreSQL service, the application safely utilizes atomic local JSON storage snapshots (`data_storage/nexus_db.json`) ensuring uninterrupted UI and algorithmic development.
+- **Development-Only Synthetic Seed**: For offline UI/sandbox development, `data_storage/seed.example.json` provides synthetic mock records. No real user emails or credentials exist in the repository.
 - **No Production Credentials Locally**: Local developer environments never require production Cloud SQL passwords.
 
 ---

@@ -6,3 +6,5 @@ coverage/
 *.log
 .env*
 !.env.example
+data_storage/
+!data_storage/seed.example.json

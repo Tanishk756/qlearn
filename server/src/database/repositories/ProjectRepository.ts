@@ -156,6 +156,124 @@ export class ProjectRepository {
     });
   }
 
+  public static async getCircuit(circuitId: string): Promise<any | null> {
+    try {
+      const rows = await pgDb.select().from(circuits).where(eq(circuits.id, circuitId)).limit(1);
+      if (!rows.length) return null;
+      const c = rows[0];
+      return {
+        id: c.id,
+        user_id: c.ownerId,
+        name: c.name,
+        qubits: c.qubits,
+        classical_bits: c.classicalBits,
+        gates_json: c.gatesJson,
+        version: c.version,
+        is_public: c.isPublic,
+        created_at: c.createdAt.toISOString(),
+        updated_at: c.updatedAt.toISOString(),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  public static async update(
+    id: string,
+    updates: {
+      title?: string;
+      description?: string;
+      tags?: string[];
+      isPublic?: boolean;
+    },
+    circuitData?: {
+      name?: string;
+      qubits: number;
+      classicalBits: number;
+      gates: any[];
+    }
+  ): Promise<boolean> {
+    try {
+      return await pgDb.transaction(async (tx) => {
+        const existing = await tx.select().from(projects).where(eq(projects.id, id)).limit(1);
+        if (!existing.length) return false;
+        const currentProject = existing[0];
+
+        const projectPayload: any = {
+          updatedAt: new Date(),
+          version: currentProject.version + 1,
+        };
+
+        if (updates.title !== undefined) projectPayload.title = updates.title.trim();
+        if (updates.description !== undefined) projectPayload.description = updates.description.trim();
+        if (updates.tags !== undefined) projectPayload.tagsJson = JSON.stringify(updates.tags);
+        if (updates.isPublic !== undefined) projectPayload.isPublic = !!updates.isPublic;
+
+        await tx.update(projects).set(projectPayload).where(eq(projects.id, id));
+
+        if (circuitData) {
+          const circuitRows = await tx.select().from(circuits).where(eq(circuits.id, currentProject.circuitId)).limit(1);
+          if (circuitRows.length > 0) {
+            const currentCircuit = circuitRows[0];
+            await tx
+              .update(circuits)
+              .set({
+                name: circuitData.name || currentCircuit.name,
+                qubits: circuitData.qubits,
+                classicalBits: circuitData.classicalBits,
+                gatesJson: JSON.stringify(circuitData.gates),
+                version: currentCircuit.version + 1,
+                updatedAt: new Date(),
+              })
+              .where(eq(circuits.id, currentProject.circuitId));
+          } else {
+            await tx.insert(circuits).values({
+              id: currentProject.circuitId,
+              ownerId: currentProject.ownerId,
+              projectId: currentProject.id,
+              name: circuitData.name || currentProject.title,
+              qubits: circuitData.qubits,
+              classicalBits: circuitData.classicalBits,
+              gatesJson: JSON.stringify(circuitData.gates),
+              version: 1,
+              isPublic: currentProject.isPublic,
+            });
+          }
+
+          // Insert version record
+          await tx.insert(projectVersions).values({
+            id: `pv_${id}_${currentProject.version + 1}`,
+            projectId: id,
+            version: currentProject.version + 1,
+            note: 'Updated circuit structure',
+            circuitIr: JSON.stringify(circuitData.gates),
+          });
+        }
+
+        return true;
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  public static async updateVisibility(id: string, visibility: 'PRIVATE' | 'UNLISTED' | 'PUBLIC', isPublic: boolean): Promise<boolean> {
+    try {
+      const res = await pgDb
+        .update(projects)
+        .set({
+          visibility,
+          isPublic,
+          updatedAt: new Date(),
+        })
+        .where(eq(projects.id, id))
+        .returning();
+      return res.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
   public static async delete(id: string): Promise<boolean> {
     try {
       const res = await pgDb.delete(projects).where(eq(projects.id, id)).returning();

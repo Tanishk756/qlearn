@@ -5,8 +5,6 @@
  * @license Apache-2.0
  */
 
-import fs from 'fs';
-import path from 'path';
 import { pgDb, pool, checkDatabaseHealth } from './client';
 import { withTransaction, withRawTransaction } from './transactions';
 export * from './schema/schema';
@@ -247,12 +245,15 @@ export interface SecurityEventRow {
 }
 
 /**
- * Enterprise Database Manager Layer
- * Synchronizes in-memory fast state with PostgreSQL persistent engine.
+ * Development-only InMemory/Snapshot Database Manager.
+ * In PRODUCTION (NODE_ENV=production):
+ * - Disk persistence is strictly DISABLED.
+ * - Auto-seeding of demo/admin accounts is strictly DISABLED.
+ * - PostgreSQL relational storage is the ONLY permitted persistence layer.
+ * - No local files or directories (/app/data_storage) are EVER read, written, or created.
  */
 class DatabaseManager {
-  private dataDir: string;
-  private dbPath: string;
+  private isProduction: boolean;
 
   public users: Map<string, UserRow> = new Map();
   public profiles: Map<string, ProfileRow> = new Map();
@@ -276,125 +277,20 @@ class DatabaseManager {
   public securityEvents: SecurityEventRow[] = [];
 
   constructor() {
-    this.dataDir = path.join(process.cwd(), 'data_storage');
-    this.dbPath = path.join(this.dataDir, 'nexus_db.json');
-    this.init();
-  }
-
-  private init() {
-    try {
-      if (!fs.existsSync(this.dataDir)) {
-        fs.mkdirSync(this.dataDir, { recursive: true });
-      }
-
-      if (fs.existsSync(this.dbPath)) {
-        const raw = fs.readFileSync(this.dbPath, 'utf8');
-        const parsed = JSON.parse(raw);
-        this.hydrate(parsed);
-      } else {
-        this.seedInitialData();
-        this.persist();
-      }
-    } catch (e) {
-      console.warn('[Database] Seeded fresh initial dataset:', e);
-      this.seedInitialData();
+    this.isProduction = process.env.NODE_ENV === 'production';
+    if (!this.isProduction) {
+      this.seedInitialSyntheticData();
     }
-  }
-
-  private hydrate(data: any) {
-    if (data.users) data.users.forEach((u: UserRow) => this.users.set(u.id, u));
-    if (data.profiles) data.profiles.forEach((p: ProfileRow) => this.profiles.set(p.user_id, p));
-    if (data.sessions) data.sessions.forEach((s: SessionRow) => this.sessions.set(s.id, s));
-    if (data.passwordResets) data.passwordResets.forEach((pr: PasswordResetRow) => this.passwordResets.set(pr.id, pr));
-    if (data.projects) data.projects.forEach((p: ProjectRow) => this.projects.set(p.id, p));
-    if (data.projectVersions) data.projectVersions.forEach((pv: ProjectVersionRow) => this.projectVersions.set(pv.id, pv));
-    if (data.circuits) data.circuits.forEach((c: CircuitRow) => this.circuits.set(c.id, c));
-    if (data.simulationJobs) data.simulationJobs.forEach((s: SimulationJobRow) => this.simulationJobs.set(s.id, s));
-    if (data.courses) data.courses.forEach((c: CourseRow) => this.courses.set(c.id, c));
-    if (data.modules) data.modules.forEach((m: ModuleRow) => this.modules.set(m.id, m));
-    if (data.lessons) data.lessons.forEach((l: LessonRow) => this.lessons.set(l.id, l));
-    if (data.quizzes) data.quizzes.forEach((q: QuizRow) => this.quizzes.set(q.id, q));
-    if (data.challenges) data.challenges.forEach((ch: ChallengeRow) => this.challenges.set(ch.id, ch));
-    if (data.lessonProgress) data.lessonProgress.forEach((lp: LessonProgressRow) => this.lessonProgress.set(lp.id, lp));
-    if (data.quizAttempts) this.quizAttempts = data.quizAttempts;
-    if (data.challengeSubmissions) this.challengeSubmissions = data.challengeSubmissions;
-    if (data.notifications) data.notifications.forEach((n: NotificationRow) => this.notifications.set(n.id, n));
-    if (data.analyticsEvents) this.analyticsEvents = data.analyticsEvents;
-    if (data.auditLogs) this.auditLogs = data.auditLogs;
-    if (data.securityEvents) this.securityEvents = data.securityEvents;
   }
 
   public persist() {
-    try {
-      if (!fs.existsSync(this.dataDir)) {
-        fs.mkdirSync(this.dataDir, { recursive: true });
-      }
-      const serialized = {
-        users: Array.from(this.users.values()),
-        profiles: Array.from(this.profiles.values()),
-        sessions: Array.from(this.sessions.values()),
-        passwordResets: Array.from(this.passwordResets.values()),
-        projects: Array.from(this.projects.values()),
-        projectVersions: Array.from(this.projectVersions.values()),
-        circuits: Array.from(this.circuits.values()),
-        simulationJobs: Array.from(this.simulationJobs.values()),
-        courses: Array.from(this.courses.values()),
-        modules: Array.from(this.modules.values()),
-        lessons: Array.from(this.lessons.values()),
-        quizzes: Array.from(this.quizzes.values()),
-        challenges: Array.from(this.challenges.values()),
-        lessonProgress: Array.from(this.lessonProgress.values()),
-        quizAttempts: this.quizAttempts,
-        challengeSubmissions: this.challengeSubmissions,
-        notifications: Array.from(this.notifications.values()),
-        analyticsEvents: this.analyticsEvents.slice(-5000),
-        auditLogs: this.auditLogs.slice(-1000),
-        securityEvents: this.securityEvents.slice(-1000),
-      };
-      const tmpPath = `${this.dbPath}.tmp`;
-      fs.writeFileSync(tmpPath, JSON.stringify(serialized, null, 2), 'utf8');
-      fs.renameSync(tmpPath, this.dbPath);
-    } catch (err) {
-      console.error('[Database] Local cache snapshot write error:', err);
-    }
+    // In-memory or production no-op. Authoritative data persists solely to PostgreSQL.
   }
 
-  private seedInitialData() {
+  private seedInitialSyntheticData() {
+    if (this.isProduction) return;
+
     const now = new Date().toISOString();
-    const adminId = 'usr_owner_01';
-    const adminUser: UserRow = {
-      id: adminId,
-      email: 'tanishksinghal6285@gmail.com',
-      password_hash: '$2a$12$e6mZc04Z.Z79B37E552fK.wGqR0Vq6s4mXh8zM6T.2ZJ72vPqKkqq',
-      name: 'Tanishk Singhal',
-      username: 'tanishk_quantum',
-      role: 'ADMIN',
-      is_active: true,
-      is_verified: true,
-      created_at: now,
-      updated_at: now,
-    };
-    this.users.set(adminId, adminUser);
-
-    const adminProfile: ProfileRow = {
-      user_id: adminId,
-      avatar_url: '',
-      avatar_preset: 'schrodinger-cat',
-      bio: 'Lead Architect & Owner of Q-Learn Nexus. Exploring topological quantum error correction and multi-qubit entanglement dynamics.',
-      affiliation: 'Quantum Information & Architecture Lab',
-      quantum_proficiency: 'Quantum Engineer',
-      theme: 'natural',
-      preferences: JSON.stringify({
-        newMessages: true,
-        importantUpdates: true,
-        mentions: true,
-        soundAlerts: true,
-      }),
-      created_at: now,
-      updated_at: now,
-    };
-    this.profiles.set(adminId, adminProfile);
-
     // Seed Courses
     const course1Id = 'course_foundations';
     this.courses.set(course1Id, {
@@ -408,7 +304,6 @@ class DatabaseManager {
       estimated_hours: 8,
       published: true,
       is_published: true,
-      author_id: adminId,
       order_index: 0,
       created_at: now,
     });
@@ -454,60 +349,6 @@ class DatabaseManager {
       difficulty: 'Beginner',
       starter_code: 'from qiskit import QuantumCircuit\nqc = QuantumCircuit(2, 2)\n# Write your code here\n',
       xp: 100,
-    });
-
-    // Seed Initial Projects
-    const circ1Id = 'circ_bell_01';
-    this.circuits.set(circ1Id, {
-      id: circ1Id,
-      user_id: adminId,
-      name: 'Bell State |Φ⁺⟩',
-      qubits: 2,
-      classical_bits: 2,
-      gates_json: JSON.stringify([
-        { id: 'g0', type: 'H', targets: [0], stepIndex: 0 },
-        { id: 'g1', type: 'CX', controls: [0], targets: [1], stepIndex: 1 },
-      ]),
-      version: 1,
-      is_public: true,
-      created_at: now,
-      updated_at: now,
-    });
-
-    const proj1Id = 'proj_bell_state_01';
-    this.projects.set(proj1Id, {
-      id: proj1Id,
-      user_id: adminId,
-      title: 'Bell State Non-Locality Test',
-      description: 'Standard 2-qubit EPR pair generation verifying Bell inequality bound.',
-      tags_json: JSON.stringify(['Foundations', 'Entanglement']),
-      circuit_id: circ1Id,
-      circuit_ir: JSON.stringify({
-        version: '1.0',
-        name: 'Bell State |Φ⁺⟩',
-        qubits: 2,
-        classicalBits: 2,
-        gates: [
-          { id: 'g0', type: 'H', targets: [0], stepIndex: 0 },
-          { id: 'g1', type: 'CX', controls: [0], targets: [1], stepIndex: 1 },
-        ],
-      }),
-      is_public: true,
-      version: 1,
-      created_at: now,
-      updated_at: now,
-    });
-
-    // Seed Initial Notification
-    const notif1Id = 'notif_welcome';
-    this.notifications.set(notif1Id, {
-      id: notif1Id,
-      user_id: adminId,
-      title: 'Welcome to Q-Learn Nexus Production',
-      message: 'Your quantum workspace has been upgraded with full database persistence, server-side simulation queue, and Q-Nova AI tutor.',
-      type: 'SYSTEM_ANNOUNCEMENT',
-      read: false,
-      created_at: now,
     });
   }
 }
