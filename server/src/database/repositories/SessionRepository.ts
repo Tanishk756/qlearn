@@ -4,7 +4,7 @@
  * @license Apache-2.0
  */
 
-import { eq, and, gt, sql } from 'drizzle-orm';
+import { eq, and, or, gt, sql } from 'drizzle-orm';
 import { pgDb } from '../client';
 import { sessions, users } from '../schema/schema';
 
@@ -79,9 +79,21 @@ export class SessionRepository {
     }
   }
 
-  public static async delete(sessionId: string): Promise<boolean> {
+  public static async delete(sessionIdOrTokenHash: string): Promise<boolean> {
     try {
-      const res = await pgDb.delete(sessions).where(eq(sessions.id, sessionId)).returning();
+      const res = await pgDb
+        .delete(sessions)
+        .where(or(eq(sessions.id, sessionIdOrTokenHash), eq(sessions.tokenHash, sessionIdOrTokenHash)))
+        .returning();
+      return res.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  public static async deleteByTokenHash(tokenHash: string): Promise<boolean> {
+    try {
+      const res = await pgDb.delete(sessions).where(eq(sessions.tokenHash, tokenHash)).returning();
       return res.length > 0;
     } catch {
       return false;

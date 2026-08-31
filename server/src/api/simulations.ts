@@ -66,9 +66,9 @@ router.post('/sync', optionalAuth, simulationRateLimiter, validateBody(simulatio
 /**
  * GET /api/v1/simulations/:id (Job Polling)
  */
-router.get('/:id', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+router.get('/:id', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   const jobId = req.params.id;
-  const job = SimulationQueue.getJob(jobId, req.user!.id);
+  const job = await SimulationQueue.getJob(jobId, req.user!.id);
 
   if (!job) {
     res.status(404).json({ error: 'NOT_FOUND', message: 'Simulation job not found.' });
@@ -91,10 +91,10 @@ router.get('/:id', authenticateToken, (req: AuthenticatedRequest, res: Response)
 /**
  * POST /api/v1/simulations/:id/cancel
  */
-router.post('/:id/cancel', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+router.post('/:id/cancel', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   const jobId = req.params.id;
   try {
-    const cancelled = SimulationQueue.cancelJob(jobId, req.user!.id);
+    const cancelled = await SimulationQueue.cancelJob(jobId, req.user!.id);
     if (!cancelled) {
       res.status(400).json({ error: 'CANNOT_CANCEL', message: 'Job is already finished or could not be cancelled.' });
       return;

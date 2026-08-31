@@ -1,11 +1,12 @@
 /**
  * Q-Learn Nexus - Authentication REST Endpoints
  * Registration, login, logout, session management, secure password recovery, and account deletion.
+ * Uses PostgreSQL/Drizzle UserRepository & SessionRepository.
  * @license Apache-2.0
  */
 
 import { Router, Request, Response } from 'express';
-import { db, UserRow, ProfileRow, PasswordResetRow } from '../database/index';
+import { UserRepository, UserDTO } from '../database/repositories/UserRepository';
 import { hashPassword, verifyPassword, performDummyPasswordCheck, generateSecureDigitCode, generateSecureToken, hashToken, constantTimeEquals } from '../security/crypto';
 import { createSession, destroySession, invalidateAllUserSessions } from '../auth/session';
 import { authenticateToken, AuthenticatedRequest } from '../auth/middleware';
@@ -25,21 +26,20 @@ router.post('/register', authRateLimiter, validateBody(registerSchema), async (r
   const normalizedEmail = email.trim().toLowerCase();
 
   // Check existing
-  for (const user of db.users.values()) {
-    if (user.email.toLowerCase() === normalizedEmail) {
-      res.status(409).json({
-        error: 'ACCOUNT_EXISTS',
-        message: 'An account with this email address already exists. Please sign in.',
-      });
-      return;
-    }
+  const existingUser = await UserRepository.findByEmail(normalizedEmail);
+  if (existingUser) {
+    res.status(409).json({
+      error: 'ACCOUNT_EXISTS',
+      message: 'An account with this email address already exists. Please sign in.',
+    });
+    return;
   }
 
   const userId = `usr_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
   const now = new Date().toISOString();
   const passwordHash = await hashPassword(password);
 
-  const newUser: UserRow = {
+  const newUser: UserDTO = {
     id: userId,
     email: normalizedEmail,
     password_hash: passwordHash,
@@ -52,30 +52,25 @@ router.post('/register', authRateLimiter, validateBody(registerSchema), async (r
     updated_at: now,
   };
 
-  const newProfile: ProfileRow = {
-    user_id: userId,
+  const profileData = {
     avatar_url: '',
     avatar_preset: 'bloch-sphere',
     bio: `Quantum computing enthusiast studying ${quantumLevel || 'quantum algorithms'} and circuit compilation.`,
     affiliation: affiliation || 'Quantum Learning Community',
     quantum_proficiency: quantumLevel || 'Student',
     theme: 'natural',
-    preferences: JSON.stringify({
+    preferences: {
       newMessages: true,
       importantUpdates: true,
       mentions: true,
       soundAlerts: true,
-    }),
-    created_at: now,
-    updated_at: now,
+    },
   };
 
-  db.users.set(userId, newUser);
-  db.profiles.set(userId, newProfile);
-  db.persist();
+  await UserRepository.create(newUser, profileData);
 
-  // Create session
-  const session = createSession(userId, req.ip, req.headers['user-agent']);
+  // Create session in PostgreSQL
+  const session = await createSession(userId, req.ip, req.headers['user-agent']);
 
   // Set secure cookie
   res.cookie('nexus_session', `${session.sessionId}.${session.rawToken}`, {
@@ -95,6 +90,8 @@ router.post('/register', authRateLimiter, validateBody(registerSchema), async (r
     status: 'SUCCESS',
   });
 
+  const createdProfile = await UserRepository.getProfile(userId);
+
   res.status(201).json({
     success: true,
     message: 'Account created successfully',
@@ -105,7 +102,7 @@ router.post('/register', authRateLimiter, validateBody(registerSchema), async (r
       email: newUser.email,
       username: newUser.username,
       role: newUser.role,
-      profile: newProfile,
+      profile: createdProfile,
     },
   });
 });
@@ -117,13 +114,7 @@ router.post('/login', authRateLimiter, validateBody(loginSchema), async (req: Re
   const { email, password } = req.body;
   const normalizedEmail = email.trim().toLowerCase();
 
-  let targetUser: UserRow | null = null;
-  for (const user of db.users.values()) {
-    if (user.email.toLowerCase() === normalizedEmail) {
-      targetUser = user;
-      break;
-    }
-  }
+  const targetUser = await UserRepository.findByEmail(normalizedEmail);
 
   if (!targetUser) {
     // Perform dummy bcrypt comparison to ensure identical execution timing
@@ -168,8 +159,8 @@ router.post('/login', authRateLimiter, validateBody(loginSchema), async (req: Re
     return;
   }
 
-  const session = createSession(targetUser.id, req.ip, req.headers['user-agent']);
-  const profile = db.profiles.get(targetUser.id);
+  const session = await createSession(targetUser.id, req.ip, req.headers['user-agent']);
+  const profile = await UserRepository.getProfile(targetUser.id);
 
   res.cookie('nexus_session', `${session.sessionId}.${session.rawToken}`, {
     httpOnly: true,
@@ -205,9 +196,9 @@ router.post('/login', authRateLimiter, validateBody(loginSchema), async (req: Re
 /**
  * POST /api/v1/auth/logout
  */
-router.post('/logout', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+router.post('/logout', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   if (req.sessionId) {
-    destroySession(req.sessionId);
+    await destroySession(req.sessionId);
   }
   res.clearCookie('nexus_session');
 
@@ -226,8 +217,8 @@ router.post('/logout', authenticateToken, (req: AuthenticatedRequest, res: Respo
 /**
  * GET /api/v1/auth/me
  */
-router.get('/me', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
-  const profile = req.user ? db.profiles.get(req.user.id) : null;
+router.get('/me', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  const profile = req.user ? await UserRepository.getProfile(req.user.id) : null;
   res.json({
     user: {
       id: req.user!.id,
@@ -250,13 +241,7 @@ router.post('/recover-password', passwordResetRateLimiter, validateBody(password
   const { email } = req.body;
   const normalizedEmail = email.trim().toLowerCase();
 
-  let targetUser: UserRow | null = null;
-  for (const user of db.users.values()) {
-    if (user.email.toLowerCase() === normalizedEmail) {
-      targetUser = user;
-      break;
-    }
-  }
+  const targetUser = await UserRepository.findByEmail(normalizedEmail);
 
   if (targetUser && targetUser.is_active) {
     const rawCode = generateSecureDigitCode();
@@ -266,18 +251,13 @@ router.post('/recover-password', passwordResetRateLimiter, validateBody(password
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 mins
 
     const resetId = `pr_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-    const resetRecord: PasswordResetRow = {
+    await UserRepository.createPasswordReset({
       id: resetId,
-      user_id: targetUser.id,
-      token_hash: tokenHash,
-      code_hash: codeHash,
-      expires_at: expiresAt,
-      used: false,
-      created_at: new Date().toISOString(),
-    };
-
-    db.passwordResets.set(resetId, resetRecord);
-    db.persist();
+      userId: targetUser.id,
+      tokenHash,
+      codeHash,
+      expiresAt,
+    });
 
     // Send transactional email
     await EmailService.sendPasswordReset(targetUser.email, rawCode, rawToken);
@@ -308,13 +288,7 @@ router.post('/reset-password', passwordResetRateLimiter, validateBody(passwordRe
   const normalizedEmail = email.trim().toLowerCase();
   const candidateCodeHash = hashToken(code.trim());
 
-  let targetUser: UserRow | null = null;
-  for (const user of db.users.values()) {
-    if (user.email.toLowerCase() === normalizedEmail) {
-      targetUser = user;
-      break;
-    }
-  }
+  const targetUser = await UserRepository.findByEmail(normalizedEmail);
 
   if (!targetUser) {
     constantTimeEquals(candidateCodeHash, candidateCodeHash);
@@ -326,17 +300,8 @@ router.post('/reset-password', passwordResetRateLimiter, validateBody(passwordRe
   }
 
   // Find active, unused reset record for this user
-  let validReset: PasswordResetRow | null = null;
-  for (const pr of db.passwordResets.values()) {
-    if (pr.user_id === targetUser.id && !pr.used) {
-      if (new Date(pr.expires_at).getTime() >= Date.now()) {
-        if (constantTimeEquals(pr.code_hash, candidateCodeHash)) {
-          validReset = pr;
-          break;
-        }
-      }
-    }
-  }
+  const activeResets = await UserRepository.findValidPasswordReset(targetUser.id);
+  const validReset = activeResets.find((pr) => constantTimeEquals(pr.codeHash, candidateCodeHash));
 
   if (!validReset) {
     logSecurityEvent({
@@ -355,15 +320,14 @@ router.post('/reset-password', passwordResetRateLimiter, validateBody(passwordRe
   }
 
   // Mark token as used
-  validReset.used = true;
+  await UserRepository.markPasswordResetUsed(validReset.id);
 
   // Hash new password and save
-  targetUser.password_hash = await hashPassword(newPassword);
-  targetUser.updated_at = new Date().toISOString();
+  const newPasswordHash = await hashPassword(newPassword);
+  await UserRepository.updatePassword(targetUser.id, newPasswordHash);
 
   // Invalidate all active sessions for security
-  invalidateAllUserSessions(targetUser.id);
-  db.persist();
+  await invalidateAllUserSessions(targetUser.id);
 
   // Send security notification email
   await EmailService.sendPasswordChanged(targetUser.email);
@@ -396,10 +360,9 @@ router.post('/change-password', authenticateToken, validateBody(changePasswordSc
     return;
   }
 
-  user.password_hash = await hashPassword(newPassword);
-  user.updated_at = new Date().toISOString();
-  invalidateAllUserSessions(user.id);
-  db.persist();
+  const newHash = await hashPassword(newPassword);
+  await UserRepository.updatePassword(user.id, newHash);
+  await invalidateAllUserSessions(user.id);
 
   await EmailService.sendPasswordChanged(user.email);
 
@@ -418,21 +381,12 @@ router.post('/change-password', authenticateToken, validateBody(changePasswordSc
 /**
  * DELETE /api/v1/auth/account (GDPR / Privacy Data Erasure)
  */
-router.delete('/account', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+router.delete('/account', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.user!.id;
 
-  // Erase user profile, sessions, projects
-  db.users.delete(userId);
-  db.profiles.delete(userId);
-  invalidateAllUserSessions(userId);
-
-  for (const [id, proj] of db.projects.entries()) {
-    if (proj.user_id === userId) db.projects.delete(id);
-  }
-  for (const [id, notif] of db.notifications.entries()) {
-    if (notif.user_id === userId) db.notifications.delete(id);
-  }
-  db.persist();
+  // Erase user and cascade delete sessions, projects
+  await invalidateAllUserSessions(userId);
+  await UserRepository.deleteUser(userId);
 
   res.clearCookie('nexus_session');
 
@@ -449,3 +403,4 @@ router.delete('/account', authenticateToken, (req: AuthenticatedRequest, res: Re
 });
 
 export default router;
+

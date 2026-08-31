@@ -34,7 +34,7 @@ async function runTests() {
   await it('TEST 1: NODE_ENV=production does not call mkdirSync for data_storage', async () => {
     process.env.NODE_ENV = 'production';
     const dataDir = path.join(process.cwd(), 'data_storage');
-    const { db } = await import('../server/src/database/index');
+    await import('../server/src/database/index');
     assert.strictEqual(fs.existsSync(dataDir), false, 'data_storage directory must not exist in production');
   });
 
@@ -46,22 +46,21 @@ async function runTests() {
     assert.strictEqual(fs.existsSync(dbFile), false, 'nexus_db.json MUST NOT exist or be read in production');
   });
 
-  // TEST 3: NODE_ENV=production does not write nexus_db.json
-  await it('TEST 3: NODE_ENV=production does not write nexus_db.json when persist() is called', async () => {
+  // TEST 3: Zero filesystem writes
+  await it('TEST 3: Zero filesystem persistence writes', async () => {
     process.env.NODE_ENV = 'production';
-    const { db } = await import('../server/src/database/index');
-    db.persist();
     const dataDir = path.join(process.cwd(), 'data_storage');
     const dbFile = path.join(dataDir, 'nexus_db.json');
-    assert.strictEqual(fs.existsSync(dbFile), false, 'persist() must be a no-op in production');
+    assert.strictEqual(fs.existsSync(dbFile), false, 'No local JSON database file is ever created in production');
+    assert.strictEqual(fs.existsSync(dataDir), false, 'No data_storage directory is created');
   });
 
-  // TEST 4: NODE_ENV=production does not call seedInitialData() or auto-seed demo accounts
-  await it('TEST 4: NODE_ENV=production does not call seedInitialData()', async () => {
+  // TEST 4: Zero auto-seeding of hardcoded user credentials
+  await it('TEST 4: Zero auto-seeding or hardcoded credentials in database layer', async () => {
     process.env.NODE_ENV = 'production';
-    const { db } = await import('../server/src/database/index');
-    assert.strictEqual(db.users.size, 0, 'Production user map must remain 0 length (no auto-seeding)');
-    assert.strictEqual(db.profiles.size, 0, 'Production profile map must remain 0 length (no auto-seeding)');
+    const dbIndex = fs.readFileSync(path.join(process.cwd(), 'server', 'src', 'database', 'index.ts'), 'utf8');
+    assert.strictEqual(dbIndex.includes('seedInitialData'), false, 'seedInitialData must not exist in database index');
+    assert.strictEqual(dbIndex.includes('DatabaseManager'), false, 'Legacy in-memory DatabaseManager must not exist');
   });
 
   // TEST 5: Production repositories use PostgreSQL/Drizzle
@@ -132,17 +131,19 @@ async function runTests() {
     assert.strictEqual(fs.existsSync(distServer), true, 'Compiled dist/server.cjs must exist');
   });
 
-  // TEST 11: Search compiled dist/server.cjs and prove production path has zero filesystem init
+  // TEST 11: Search compiled dist/server.cjs and prove production path has zero filesystem database
   await it('TEST 11: Search compiled dist/server.cjs and verify production guards', async () => {
     const distServer = path.join(process.cwd(), 'dist', 'server.cjs');
     const content = fs.readFileSync(distServer, 'utf8');
-    assert.ok(content.includes('STRICTLY DISABLED') || content.includes('initDevelopment'), 'Production guards are present in compiled bundle');
+    assert.strictEqual(content.includes('nexus_db.json'), false, 'Compiled bundle contains zero references to nexus_db.json');
+    assert.strictEqual(content.includes('tanishksinghal'), false, 'Compiled bundle contains zero hardcoded user credentials');
   });
 
   console.log(`\nResults: ${passed} passed, ${failed} failed.\n`);
   if (failed > 0) {
     process.exit(1);
   }
+  process.exit(0);
 }
 
 runTests().catch((err) => {

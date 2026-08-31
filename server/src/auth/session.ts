@@ -1,11 +1,13 @@
 /**
  * Q-Learn Nexus - Session Management
  * Server-authoritative cryptographic session store with token hashing and IP/UA tracking.
+ * Uses PostgreSQL SessionRepository as authoritative persistence layer.
  * @license Apache-2.0
  */
 
-import { db, UserRow, SessionRow } from '../database/index';
 import { generateSecureToken, hashToken, constantTimeEquals } from '../security/crypto';
+import { SessionRepository, SessionDTO } from '../database/repositories/SessionRepository';
+import { UserRepository, UserDTO } from '../database/repositories/UserRepository';
 import crypto from 'crypto';
 
 const SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
@@ -14,14 +16,18 @@ export interface CreatedSession {
   sessionId: string;
   rawToken: string;
   expiresAt: string;
-  user: UserRow;
+  user: UserDTO;
 }
 
 /**
- * Creates a new authenticated session for a user.
+ * Creates a new authenticated session for a user in PostgreSQL.
  */
-export function createSession(userId: string, ipAddress = '127.0.0.1', userAgent = 'unknown'): CreatedSession {
-  const user = db.users.get(userId);
+export async function createSession(
+  userId: string,
+  ipAddress = '127.0.0.1',
+  userAgent = 'unknown'
+): Promise<CreatedSession> {
+  const user = await UserRepository.findById(userId);
   if (!user) {
     throw new Error('User not found');
   }
@@ -31,7 +37,7 @@ export function createSession(userId: string, ipAddress = '127.0.0.1', userAgent
   const sessionId = `sess_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
 
-  const sessionRow: SessionRow = {
+  const sessionRow: SessionDTO = {
     id: sessionId,
     user_id: userId,
     token_hash: tokenHash,
@@ -41,8 +47,7 @@ export function createSession(userId: string, ipAddress = '127.0.0.1', userAgent
     created_at: new Date().toISOString(),
   };
 
-  db.sessions.set(sessionId, sessionRow);
-  db.persist();
+  await SessionRepository.create(sessionRow);
 
   return {
     sessionId,
@@ -53,87 +58,41 @@ export function createSession(userId: string, ipAddress = '127.0.0.1', userAgent
 }
 
 /**
- * Validates a raw token or composite session credential (sessionId:rawToken).
+ * Validates a raw token or composite session credential (sessionId.rawToken) against PostgreSQL.
  */
-export function validateSession(credential: string): { user: UserRow; session: SessionRow } | null {
+export async function validateSession(credential: string): Promise<{ user: UserDTO; session: SessionDTO } | null> {
   if (!credential) return null;
 
-  let sessionId = '';
   let rawToken = '';
-
   if (credential.includes('.')) {
     const parts = credential.split('.');
-    sessionId = parts[0];
     rawToken = parts[1];
   } else {
-    // If only rawToken provided, search active sessions
     rawToken = credential;
   }
 
+  if (!rawToken) return null;
+
   const candidateHash = hashToken(rawToken);
+  const result = await SessionRepository.findByTokenHash(candidateHash);
+  if (!result) return null;
 
-  if (sessionId) {
-    const session = db.sessions.get(sessionId);
-    if (!session) return null;
+  if (!result.user.is_active) return null;
 
-    if (new Date(session.expires_at).getTime() < Date.now()) {
-      db.sessions.delete(sessionId);
-      db.persist();
-      return null;
-    }
-
-    if (!constantTimeEquals(session.token_hash, candidateHash)) {
-      return null;
-    }
-
-    const user = db.users.get(session.user_id);
-    if (!user || !user.is_active) return null;
-
-    return { user, session };
-  }
-
-  // Linear lookup if no explicit sessionId was prefixed
-  for (const session of db.sessions.values()) {
-    if (constantTimeEquals(session.token_hash, candidateHash)) {
-      if (new Date(session.expires_at).getTime() < Date.now()) {
-        db.sessions.delete(session.id);
-        db.persist();
-        return null;
-      }
-      const user = db.users.get(session.user_id);
-      if (!user || !user.is_active) return null;
-      return { user, session };
-    }
-  }
-
-  return null;
+  return result;
 }
 
 /**
- * Destroys a session by ID or token.
+ * Destroys a session by ID in PostgreSQL.
  */
-export function destroySession(sessionId: string): boolean {
-  const exists = db.sessions.has(sessionId);
-  if (exists) {
-    db.sessions.delete(sessionId);
-    db.persist();
-  }
-  return exists;
+export async function destroySession(sessionId: string): Promise<boolean> {
+  return await SessionRepository.delete(sessionId);
 }
 
 /**
  * Invalidates all active sessions for a user (e.g. after password reset or security alert).
  */
-export function invalidateAllUserSessions(userId: string): number {
-  let count = 0;
-  for (const [id, session] of db.sessions.entries()) {
-    if (session.user_id === userId) {
-      db.sessions.delete(id);
-      count++;
-    }
-  }
-  if (count > 0) {
-    db.persist();
-  }
-  return count;
+export async function invalidateAllUserSessions(userId: string): Promise<number> {
+  return await SessionRepository.deleteAllForUser(userId);
 }
+

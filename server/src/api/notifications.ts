@@ -1,11 +1,12 @@
 /**
  * Q-Learn Nexus - Notifications API
  * Lists user alerts, marks as read, batch acknowledges, and manages preferences.
+ * Uses PostgreSQL NotificationRepository.
  * @license Apache-2.0
  */
 
 import { Router, Response } from 'express';
-import { db } from '../database/index';
+import { NotificationRepository } from '../database/repositories/NotificationRepository';
 import { authenticateToken, AuthenticatedRequest } from '../auth/middleware';
 
 const router = Router();
@@ -13,26 +14,9 @@ const router = Router();
 /**
  * GET /api/v1/notifications
  */
-router.get('/', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+router.get('/', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.user!.id;
-  const userNotifs = [];
-
-  for (const notif of db.notifications.values()) {
-    if (notif.user_id === userId) {
-      userNotifs.push({
-        id: notif.id,
-        title: notif.title,
-        message: notif.message,
-        type: notif.type,
-        read: notif.read,
-        actionLink: notif.action_link,
-        createdAt: notif.created_at,
-      });
-    }
-  }
-
-  // Sort descending by created_at
-  userNotifs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  const userNotifs = await NotificationRepository.listByUser(userId);
 
   res.json({
     success: true,
@@ -44,17 +28,14 @@ router.get('/', authenticateToken, (req: AuthenticatedRequest, res: Response) =>
 /**
  * PATCH /api/v1/notifications/:id/read
  */
-router.patch('/:id/read', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+router.patch('/:id/read', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
-  const notif = db.notifications.get(id);
+  const success = await NotificationRepository.markAsRead(id, req.user!.id);
 
-  if (!notif || notif.user_id !== req.user!.id) {
+  if (!success) {
     res.status(404).json({ error: 'NOT_FOUND', message: 'Notification not found' });
     return;
   }
-
-  notif.read = true;
-  db.persist();
 
   res.json({ success: true, message: 'Notification marked as read.' });
 });
@@ -62,15 +43,9 @@ router.patch('/:id/read', authenticateToken, (req: AuthenticatedRequest, res: Re
 /**
  * POST /api/v1/notifications/mark-all-read
  */
-router.post('/mark-all-read', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+router.post('/mark-all-read', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.user!.id;
-
-  for (const notif of db.notifications.values()) {
-    if (notif.user_id === userId) {
-      notif.read = true;
-    }
-  }
-  db.persist();
+  await NotificationRepository.markAllAsRead(userId);
 
   res.json({ success: true, message: 'All notifications marked as read.' });
 });
@@ -78,19 +53,17 @@ router.post('/mark-all-read', authenticateToken, (req: AuthenticatedRequest, res
 /**
  * DELETE /api/v1/notifications/:id
  */
-router.delete('/:id', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+router.delete('/:id', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
-  const notif = db.notifications.get(id);
+  const success = await NotificationRepository.delete(id, req.user!.id);
 
-  if (!notif || notif.user_id !== req.user!.id) {
+  if (!success) {
     res.status(404).json({ error: 'NOT_FOUND', message: 'Notification not found' });
     return;
   }
-
-  db.notifications.delete(id);
-  db.persist();
 
   res.json({ success: true, message: 'Notification deleted.' });
 });
 
 export default router;
+

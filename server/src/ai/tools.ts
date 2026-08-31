@@ -1,10 +1,16 @@
 /**
  * Q-Learn Nexus - Q-Nova AI Controlled Tool Interface & Sandbox
  * Strictly validates inputs, checks authorization, enforces resource limits, and suppresses privilege escalation.
+ * Uses PostgreSQL repositories.
  * @license Apache-2.0
  */
 
-import { db } from '../database/index';
+import { CourseRepository } from '../database/repositories/CourseRepository';
+import { ProjectRepository } from '../database/repositories/ProjectRepository';
+import { UserRepository } from '../database/repositories/UserRepository';
+import { pgDb } from '../database/client';
+import { lessons } from '../database/schema/schema';
+import { ilike, or } from 'drizzle-orm';
 import { simulateServerCircuit, QuantumCircuitIR } from '../quantum/engine';
 
 export interface ControlledToolDefinition {
@@ -20,7 +26,7 @@ export const CONTROLLED_AI_TOOLS: Record<string, ControlledToolDefinition> = {
     description: 'Retrieves verified curriculum content for a lesson.',
     parameters: { type: 'object', properties: { lessonId: { type: 'string' } }, required: ['lessonId'] },
     handler: async (args: { lessonId: string }) => {
-      const lesson = db.lessons.get(args.lessonId);
+      const lesson = await CourseRepository.getLesson(args.lessonId);
       if (!lesson) return { error: 'Lesson not found' };
       return { id: lesson.id, title: lesson.title, content: lesson.content };
     },
@@ -31,7 +37,7 @@ export const CONTROLLED_AI_TOOLS: Record<string, ControlledToolDefinition> = {
     description: 'Retrieves a user circuit by ID.',
     parameters: { type: 'object', properties: { circuitId: { type: 'string' } }, required: ['circuitId'] },
     handler: async (args: { circuitId: string }, userId: string) => {
-      const circuit = db.circuits.get(args.circuitId);
+      const circuit = await ProjectRepository.getCircuit(args.circuitId);
       if (!circuit) return { error: 'Circuit not found' };
       if (circuit.user_id !== userId) return { error: 'Access denied: circuit belongs to another user' };
       return { id: circuit.id, name: circuit.name, qubits: circuit.qubits, gates: JSON.parse(circuit.gates_json) };
@@ -73,8 +79,9 @@ export const CONTROLLED_AI_TOOLS: Record<string, ControlledToolDefinition> = {
     description: 'Retrieves current user progress statistics safely.',
     parameters: { type: 'object', properties: {} },
     handler: async (_args: any, userId: string) => {
-      const profile = db.profiles.get(userId);
-      const completedCount = Array.from(db.lessonProgress.values()).filter((lp) => lp.user_id === userId && lp.completed).length;
+      const profile = await UserRepository.getProfile(userId);
+      const progress = await CourseRepository.getUserLessonProgress(userId);
+      const completedCount = progress.filter((lp) => lp.completed).length;
       return {
         quantumProficiency: profile?.quantum_proficiency || 'Student',
         completedLessons: completedCount,
@@ -87,14 +94,18 @@ export const CONTROLLED_AI_TOOLS: Record<string, ControlledToolDefinition> = {
     description: 'Searches published course materials by keyword.',
     parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
     handler: async (args: { query: string }) => {
-      const q = (args.query || '').toLowerCase();
-      const results = [];
-      for (const lesson of db.lessons.values()) {
-        if (lesson.title.toLowerCase().includes(q) || lesson.content.toLowerCase().includes(q)) {
-          results.push({ id: lesson.id, title: lesson.title });
-        }
+      const q = (args.query || '').trim();
+      if (!q) return [];
+      try {
+        const rows = await pgDb
+          .select({ id: lessons.id, title: lessons.title })
+          .from(lessons)
+          .where(or(ilike(lessons.title, `%${q}%`), ilike(lessons.content, `%${q}%`)))
+          .limit(5);
+        return rows;
+      } catch {
+        return [];
       }
-      return results.slice(0, 5);
     },
   },
 
@@ -126,3 +137,4 @@ export const CONTROLLED_AI_TOOLS: Record<string, ControlledToolDefinition> = {
     },
   },
 };
+

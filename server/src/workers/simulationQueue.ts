@@ -1,10 +1,12 @@
 /**
  * Q-Learn Nexus - Quantum Simulation Queue & Worker Service
  * Asynchronous job scheduling, resource limit enforcement, and result persistence.
+ * Uses PostgreSQL SimulationRepository.
  * @license Apache-2.0
  */
 
-import { db, SimulationJobRow } from '../database/index';
+import { SimulationRepository } from '../database/repositories/SimulationRepository';
+import { UserRepository } from '../database/repositories/UserRepository';
 import {
   simulateServerCircuit,
   QuantumCircuitIR,
@@ -34,7 +36,7 @@ export class SimulationQueue {
   /**
    * Validates circuit resources and enqueues a new simulation job.
    */
-  public static async enqueueJob(params: EnqueueSimulationParams): Promise<SimulationJobRow> {
+  public static async enqueueJob(params: EnqueueSimulationParams): Promise<any> {
     const { userId, circuitIR } = params;
     const simType = params.simulationType || 'STATEVECTOR';
     const shots = Math.min(Math.max(1, params.shots || 1024), this.MAX_SHOTS);
@@ -62,7 +64,15 @@ export class SimulationQueue {
     const jobId = `sim_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const now = new Date().toISOString();
 
-    const jobRow: SimulationJobRow = {
+    await SimulationRepository.createJob({
+      id: jobId,
+      userId,
+      circuitIr: JSON.stringify(circuitIR),
+      provider,
+      shots,
+    });
+
+    const jobRow = {
       id: jobId,
       user_id: userId,
       circuit_ir: JSON.stringify(circuitIR),
@@ -72,12 +82,9 @@ export class SimulationQueue {
       created_at: now,
     };
 
-    db.simulationJobs.set(jobId, jobRow);
-    db.persist();
-
     // Process job asynchronously in worker
     setImmediate(() => {
-      this.processJob(jobId, circuitIR, shots);
+      this.processJob(jobId, circuitIR, shots, userId);
     });
 
     return jobRow;
@@ -86,47 +93,52 @@ export class SimulationQueue {
   /**
    * Worker process: executes simulation and persists results.
    */
-  private static async processJob(jobId: string, ir: QuantumCircuitIR, shots: number) {
-    const job = db.simulationJobs.get(jobId);
+  private static async processJob(jobId: string, ir: QuantumCircuitIR, shots: number, userId: string) {
+    const job = await SimulationRepository.getJobById(jobId);
     if (!job || job.status === 'CANCELLED') return;
 
-    job.status = 'RUNNING';
-    db.persist();
+    await SimulationRepository.updateJobStatus({
+      id: jobId,
+      status: 'RUNNING',
+    });
 
     try {
       const startTime = Date.now();
       const result: SimulationResult = simulateServerCircuit(ir, shots);
       const durationMs = Date.now() - startTime;
 
-      job.status = 'COMPLETED';
-      job.results_json = JSON.stringify(result);
-      job.duration_ms = durationMs;
-      job.completed_at = new Date().toISOString();
-      db.persist();
+      await SimulationRepository.updateJobStatus({
+        id: jobId,
+        status: 'COMPLETED',
+        resultsJson: JSON.stringify(result),
+        durationMs,
+      });
 
       // Dispatch real-time notification
       await NotificationDispatcher.dispatch({
-        userId: job.user_id,
+        userId,
         type: 'SIMULATION_COMPLETED',
         title: 'Quantum Simulation Completed',
         message: `Circuit "${ir.name}" (${ir.qubits} qubits) completed with ${shots} shots in ${durationMs}ms.`,
         actionLink: `/lab?circuit=${ir.name}`,
       });
     } catch (err: any) {
-      job.status = 'FAILED';
-      job.error_message = err?.message || 'Internal simulation engine error';
-      job.completed_at = new Date().toISOString();
-      db.persist();
+      await SimulationRepository.updateJobStatus({
+        id: jobId,
+        status: 'FAILED',
+        errorMessage: err?.message || 'Internal simulation engine error',
+      });
     }
   }
 
   /**
    * Cancels a queued or running simulation job.
    */
-  public static cancelJob(jobId: string, userId: string): boolean {
-    const job = db.simulationJobs.get(jobId);
+  public static async cancelJob(jobId: string, userId: string): Promise<boolean> {
+    const job = await SimulationRepository.getJobById(jobId);
     if (!job) return false;
-    if (job.user_id !== userId && !db.users.get(userId)?.role?.includes('ADMIN')) {
+    const user = await UserRepository.findById(userId);
+    if (job.userId !== userId && !user?.role?.includes('ADMIN')) {
       throw new Error('Unauthorized to cancel this job.');
     }
 
@@ -134,18 +146,32 @@ export class SimulationQueue {
       return false;
     }
 
-    job.status = 'CANCELLED';
-    job.completed_at = new Date().toISOString();
-    db.persist();
+    await SimulationRepository.updateJobStatus({
+      id: jobId,
+      status: 'CANCELLED',
+    });
     return true;
   }
 
   /**
    * Retrieves simulation job status and results.
    */
-  public static getJob(jobId: string, userId: string): SimulationJobRow | null {
-    const job = db.simulationJobs.get(jobId);
+  public static async getJob(jobId: string, userId: string): Promise<any> {
+    const job = await SimulationRepository.getJobById(jobId);
     if (!job) return null;
-    return job;
+    return {
+      id: job.id,
+      user_id: job.userId,
+      circuit_ir: job.circuitIr,
+      status: job.status,
+      provider: job.provider,
+      shots: job.shots,
+      results_json: job.resultsJson,
+      error_message: job.errorMessage,
+      duration_ms: job.durationMs,
+      created_at: job.createdAt.toISOString(),
+      completed_at: job.completedAt?.toISOString(),
+    };
   }
 }
+

@@ -70,95 +70,32 @@ export class SimulationRepository {
       return null;
     }
   }
-}
 
-export class NotificationRepository {
-  public static async create(notification: {
-    id: string;
-    userId: string;
-    title: string;
-    message: string;
-    type: string;
-    actionLink?: string;
-  }) {
+  public static async listJobsByUser(userId: string, limit = 50) {
     try {
-      await pgDb.insert(notifications).values({
-        id: notification.id,
-        userId: notification.userId,
-        title: notification.title,
-        message: notification.message,
-        type: notification.type,
-        actionLink: notification.actionLink,
-      });
-    } catch (e) {
-      console.warn('[Notification Repository] Insert skipped:', e);
-    }
-  }
-
-  public static async getUserNotifications(userId: string) {
-    try {
-      return await pgDb
+      const rows = await pgDb
         .select()
-        .from(notifications)
-        .where(eq(notifications.userId, userId))
-        .orderBy(desc(notifications.createdAt));
+        .from(simulationJobs)
+        .where(eq(simulationJobs.userId, userId))
+        .orderBy(desc(simulationJobs.createdAt))
+        .limit(limit);
+      return rows;
     } catch {
       return [];
     }
   }
 
-  public static async markAllRead(userId: string) {
+  public static async listAllJobs(limit = 100) {
     try {
-      await pgDb.update(notifications).set({ read: true }).where(eq(notifications.userId, userId));
-    } catch {}
-  }
-}
-
-export class AuditRepository {
-  public static async logAudit(entry: {
-    id: string;
-    userId?: string;
-    action: string;
-    resourceType: string;
-    resourceId?: string;
-    ipAddress: string;
-    userAgent: string;
-    status: 'SUCCESS' | 'FAILURE' | 'DENIED';
-    metadata?: any;
-  }) {
-    try {
-      await pgDb.insert(auditLogs).values({
-        id: entry.id,
-        userId: entry.userId,
-        action: entry.action,
-        resourceType: entry.resourceType,
-        resourceId: entry.resourceId,
-        ipAddress: entry.ipAddress,
-        userAgent: entry.userAgent,
-        status: entry.status,
-        metadata: JSON.stringify(entry.metadata || {}),
-      });
-    } catch {}
-  }
-
-  public static async logSecurity(entry: {
-    id: string;
-    userId?: string;
-    eventType: string;
-    severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
-    details: string;
-    ipAddress: string;
-  }) {
-    try {
-      await pgDb.insert(securityEvents).values({
-        id: entry.id,
-        userId: entry.userId,
-        eventType: entry.eventType,
-        severity: entry.severity,
-        details: entry.details,
-        ipAddress: entry.ipAddress,
-      });
-    } catch {}
+      const rows = await pgDb
+        .select()
+        .from(simulationJobs)
+        .orderBy(desc(simulationJobs.createdAt))
+        .limit(limit);
+      return rows;
+    } catch {
+      return [];
+    }
   }
 }
 

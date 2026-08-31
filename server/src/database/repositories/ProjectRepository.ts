@@ -101,20 +101,7 @@ export class ProjectRepository {
     }
   ): Promise<ProjectDTO> {
     return await pgDb.transaction(async (tx) => {
-      // 1. Create circuit record
-      await tx.insert(circuits).values({
-        id: project.circuit_id,
-        ownerId: project.user_id,
-        projectId: project.id,
-        name: circuitData.name,
-        qubits: circuitData.qubits,
-        classicalBits: circuitData.classical_bits,
-        gatesJson: circuitData.gates_json,
-        version: 1,
-        isPublic: project.is_public,
-      });
-
-      // 2. Create project record
+      // 1. Create project record first
       const inserted = await tx
         .insert(projects)
         .values({
@@ -129,6 +116,19 @@ export class ProjectRepository {
           version: 1,
         })
         .returning();
+
+      // 2. Create circuit record referencing project.id
+      await tx.insert(circuits).values({
+        id: project.circuit_id,
+        ownerId: project.user_id,
+        projectId: project.id,
+        name: circuitData.name,
+        qubits: circuitData.qubits,
+        classicalBits: circuitData.classical_bits,
+        gatesJson: circuitData.gates_json,
+        version: 1,
+        isPublic: project.is_public,
+      });
 
       // 3. Create initial project version
       await tx.insert(projectVersions).values({

@@ -1,11 +1,13 @@
 /**
  * Q-Learn Nexus - Administration & Security Operations API
  * RBAC Protected (ADMIN Only): User management, role elevation, immutable audit log queries, security alerts.
+ * Uses PostgreSQL UserRepository and AuditRepository.
  * @license Apache-2.0
  */
 
 import { Router, Response } from 'express';
-import { db } from '../database/index';
+import { UserRepository } from '../database/repositories/UserRepository';
+import { AuditRepository } from '../database/repositories/AuditRepository';
 import { authenticateToken, requireAdmin, AuthenticatedRequest } from '../auth/middleware';
 import { logAuditEvent, logSecurityEvent } from '../security/auditLogger';
 
@@ -17,10 +19,13 @@ router.use(authenticateToken, requireAdmin);
 /**
  * GET /api/v1/admin/users
  */
-router.get('/users', (req: AuthenticatedRequest, res: Response) => {
-  const users = Array.from(db.users.values()).map((u) => {
-    const profile = db.profiles.get(u.id);
-    return {
+router.get('/users', async (req: AuthenticatedRequest, res: Response) => {
+  const users = await UserRepository.listAll();
+  const result = [];
+
+  for (const u of users) {
+    const profile = await UserRepository.getProfile(u.id);
+    result.push({
       id: u.id,
       email: u.email,
       name: u.name,
@@ -30,16 +35,16 @@ router.get('/users', (req: AuthenticatedRequest, res: Response) => {
       isVerified: u.is_verified,
       proficiency: profile?.quantum_proficiency || 'Student',
       createdAt: u.created_at,
-    };
-  });
+    });
+  }
 
-  res.json({ success: true, users });
+  res.json({ success: true, users: result });
 });
 
 /**
  * PATCH /api/v1/admin/users/:id/role
  */
-router.patch('/users/:id/role', (req: AuthenticatedRequest, res: Response) => {
+router.patch('/users/:id/role', async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
   const { role } = req.body;
 
@@ -48,16 +53,14 @@ router.patch('/users/:id/role', (req: AuthenticatedRequest, res: Response) => {
     return;
   }
 
-  const targetUser = db.users.get(id);
+  const targetUser = await UserRepository.findById(id);
   if (!targetUser) {
     res.status(404).json({ error: 'NOT_FOUND', message: 'User not found' });
     return;
   }
 
   const previousRole = targetUser.role;
-  targetUser.role = role;
-  targetUser.updated_at = new Date().toISOString();
-  db.persist();
+  await UserRepository.updateRole(id, role);
 
   logAuditEvent({
     userId: req.user!.id,
@@ -83,19 +86,17 @@ router.patch('/users/:id/role', (req: AuthenticatedRequest, res: Response) => {
 /**
  * PATCH /api/v1/admin/users/:id/status
  */
-router.patch('/users/:id/status', (req: AuthenticatedRequest, res: Response) => {
+router.patch('/users/:id/status', async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
   const { isActive } = req.body;
 
-  const targetUser = db.users.get(id);
+  const targetUser = await UserRepository.findById(id);
   if (!targetUser) {
     res.status(404).json({ error: 'NOT_FOUND', message: 'User not found' });
     return;
   }
 
-  targetUser.is_active = !!isActive;
-  targetUser.updated_at = new Date().toISOString();
-  db.persist();
+  await UserRepository.updateStatus(id, !!isActive);
 
   res.json({ success: true, message: `User status set to ${isActive ? 'Active' : 'Suspended'}.` });
 });
@@ -103,38 +104,41 @@ router.patch('/users/:id/status', (req: AuthenticatedRequest, res: Response) => 
 /**
  * GET /api/v1/admin/audit-logs
  */
-router.get('/audit-logs', (req: AuthenticatedRequest, res: Response) => {
+router.get('/audit-logs', async (req: AuthenticatedRequest, res: Response) => {
   const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
-  const logs = [...db.auditLogs].reverse().slice(0, limit);
+  const logs = await AuditRepository.listAuditLogs(limit);
   res.json({ success: true, logs });
 });
 
 /**
  * GET /api/v1/admin/security-events
  */
-router.get('/security-events', (req: AuthenticatedRequest, res: Response) => {
+router.get('/security-events', async (req: AuthenticatedRequest, res: Response) => {
   const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
-  const events = [...db.securityEvents].reverse().slice(0, limit);
+  const events = await AuditRepository.listSecurityEvents(limit);
   res.json({ success: true, events });
 });
 
 /**
  * GET /api/v1/admin/system-stats
  */
-router.get('/system-stats', (req: AuthenticatedRequest, res: Response) => {
+router.get('/system-stats', async (req: AuthenticatedRequest, res: Response) => {
+  const dbStats = await AuditRepository.getSystemStats();
+
   res.json({
     success: true,
     server: {
       uptimeSeconds: Math.floor(process.uptime()),
       nodeVersion: process.version,
       memoryUsageMb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-      activeSessions: db.sessions.size,
-      totalUsers: db.users.size,
-      totalProjects: db.projects.size,
-      totalCircuits: db.circuits.size,
-      simulationJobsTotal: db.simulationJobs.size,
+      activeSessions: dbStats.activeSessions,
+      totalUsers: dbStats.totalUsers,
+      totalProjects: dbStats.totalProjects,
+      totalCircuits: dbStats.totalCircuits,
+      simulationJobsTotal: dbStats.simulationJobsTotal,
     },
   });
 });
 
 export default router;
+

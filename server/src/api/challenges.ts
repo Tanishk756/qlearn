@@ -1,11 +1,12 @@
 /**
  * Q-Learn Nexus - Quantum Coding Challenges API
  * Algorithm puzzles, automated unit test grading, and achievement tracking.
+ * Uses PostgreSQL ChallengeRepository.
  * @license Apache-2.0
  */
 
 import { Router, Response } from 'express';
-import { db, ChallengeSubmissionRow } from '../database/index';
+import { ChallengeRepository } from '../database/repositories/CourseRepository';
 import { authenticateToken, optionalAuth, AuthenticatedRequest } from '../auth/middleware';
 import { NotificationDispatcher } from '../notifications/dispatcher';
 import crypto from 'crypto';
@@ -15,21 +16,26 @@ const router = Router();
 /**
  * GET /api/v1/challenges
  */
-router.get('/', optionalAuth, (req: AuthenticatedRequest, res: Response) => {
+router.get('/', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
   const list = [];
   const currentUserId = req.user?.id;
 
-  for (const ch of db.challenges.values()) {
-    const passed = currentUserId
-      ? db.challengeSubmissions.some((s) => s.user_id === currentUserId && s.challenge_id === ch.id && s.passed)
-      : false;
+  const challenges = await ChallengeRepository.listChallenges();
+  const userSubmissions = currentUserId ? await ChallengeRepository.getUserSubmissions(currentUserId) : [];
+  const passedSet = new Set<string>();
+  for (const s of userSubmissions) {
+    if (s.passed) passedSet.add(s.challengeId);
+  }
+
+  for (const ch of challenges) {
+    const passed = passedSet.has(ch.id);
 
     list.push({
       id: ch.id,
       title: ch.title,
       description: ch.description,
       difficulty: ch.difficulty,
-      starterCode: ch.starter_code,
+      starterCode: ch.starterCode,
       xp: ch.xp,
       passed,
     });
@@ -46,7 +52,7 @@ router.post('/:id/submit', authenticateToken, async (req: AuthenticatedRequest, 
   const { code } = req.body;
   const userId = req.user!.id;
 
-  const challenge = db.challenges.get(id);
+  const challenge = await ChallengeRepository.getChallenge(id);
   if (!challenge) {
     res.status(404).json({ error: 'NOT_FOUND', message: 'Challenge not found.' });
     return;
@@ -57,18 +63,17 @@ router.post('/:id/submit', authenticateToken, async (req: AuthenticatedRequest, 
   const hasCX = /qc\.cx\(0,\s*1\)|qml\.CNOT|cx q\[0\]/.test(code);
   const passed = hasH && hasCX;
 
-  const submissionRow: ChallengeSubmissionRow = {
-    id: `sub_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
-    user_id: userId,
-    challenge_id: id,
-    code_submitted: code,
-    passed,
-    output: passed ? 'All 3 test cases passed. Statevector fidelity = 1.000.' : 'Test case 1 failed: Expected state (|00> + |11>)/sqrt(2).',
-    created_at: new Date().toISOString(),
-  };
+  const subId = `sub_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+  const output = passed ? 'All 3 test cases passed. Statevector fidelity = 1.000.' : 'Test case 1 failed: Expected state (|00> + |11>)/sqrt(2).';
 
-  db.challengeSubmissions.push(submissionRow);
-  db.persist();
+  await ChallengeRepository.recordSubmission({
+    id: subId,
+    userId,
+    challengeId: id,
+    codeSubmitted: code,
+    passed,
+    output,
+  });
 
   if (passed) {
     await NotificationDispatcher.dispatch({
@@ -83,9 +88,10 @@ router.post('/:id/submit', authenticateToken, async (req: AuthenticatedRequest, 
   res.json({
     success: true,
     passed,
-    output: submissionRow.output,
+    output,
     xpAwarded: passed ? challenge.xp : 0,
   });
 });
 
 export default router;
+

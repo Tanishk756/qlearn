@@ -1,10 +1,11 @@
 /**
  * Q-Learn Nexus - Audit & Security Event Logger
  * Append-only immutable structured audit trail. Never logs passwords, API keys, or raw secrets.
+ * Uses PostgreSQL AuditRepository.
  * @license Apache-2.0
  */
 
-import { db, AuditLogRow, SecurityEventRow } from '../database/index';
+import { AuditRepository } from '../database/repositories/AuditRepository';
 import crypto from 'crypto';
 
 export function logAuditEvent(params: {
@@ -18,21 +19,21 @@ export function logAuditEvent(params: {
   metadata?: Record<string, any>;
 }) {
   try {
-    const entry: AuditLogRow = {
-      id: `aud_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
-      user_id: params.userId,
+    const id = `aud_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    // Fire and forget or handle asynchronously
+    AuditRepository.logAudit({
+      id,
+      userId: params.userId,
       action: params.action,
-      resource_type: params.resourceType,
-      resource_id: params.resourceId,
-      ip_address: params.ipAddress || '127.0.0.1',
-      user_agent: params.userAgent || 'system',
+      resourceType: params.resourceType,
+      resourceId: params.resourceId,
+      ipAddress: params.ipAddress || '127.0.0.1',
+      userAgent: params.userAgent || 'system',
       status: params.status,
       metadata: JSON.stringify(params.metadata || {}),
-      created_at: new Date().toISOString(),
-    };
-
-    db.auditLogs.push(entry);
-    db.persist();
+    }).catch((err) => {
+      console.error('[AuditLogger] Async audit write failed:', err);
+    });
   } catch (err) {
     console.error('[AuditLogger] Failed to log audit event:', err);
   }
@@ -46,20 +47,20 @@ export function logSecurityEvent(params: {
   ipAddress?: string;
 }) {
   try {
-    const entry: SecurityEventRow = {
-      id: `sec_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
-      user_id: params.userId,
-      event_type: params.eventType,
+    const id = `sec_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    AuditRepository.logSecurity({
+      id,
+      userId: params.userId,
+      eventType: params.eventType,
       severity: params.severity,
       details: params.details,
-      ip_address: params.ipAddress || '127.0.0.1',
-      created_at: new Date().toISOString(),
-    };
-
-    db.securityEvents.push(entry);
-    db.persist();
+      ipAddress: params.ipAddress || '127.0.0.1',
+    }).catch((err) => {
+      console.error('[AuditLogger] Async security write failed:', err);
+    });
     console.warn(`[SECURITY EVENT][${params.severity}] ${params.eventType}: ${params.details}`);
   } catch (err) {
     console.error('[AuditLogger] Failed to log security event:', err);
   }
 }
+

@@ -15,7 +15,7 @@ import { QuantumSandbox } from '../quantum/sandbox';
 import { IsolatedRunner } from '../quantum/isolatedRunner';
 import { simulateServerCircuit, CANONICAL_QUBIT_ORDER, QuantumCircuitIR } from '../quantum/engine';
 import { SimulationQueue } from '../workers/simulationQueue';
-import { db } from '../database/index';
+import { UserRepository } from '../database/repositories/UserRepository';
 
 interface TestResult {
   section: string;
@@ -153,6 +153,26 @@ async function runE2EVerification() {
   // -------------------------------------------------------------------------
   console.log('\n--- SECTIONS 7 & 8: QUEUE INTEGRATION & PERSISTENCE ---');
   const testUserId = 'usr_test_audit_user';
+  try {
+    const existingUser = await UserRepository.findById(testUserId);
+    if (!existingUser) {
+      await UserRepository.create({
+        id: testUserId,
+        email: 'audit_test_user@example.com',
+        username: 'audit_test_user',
+        password_hash: '$2b$10$dummyHashForTestingPurposesOnly000000000000000000000',
+        name: 'Audit Test User',
+        role: 'STUDENT',
+        is_active: true,
+        is_verified: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+    }
+  } catch (err) {
+    console.warn('Test user creation notice:', err);
+  }
+
   const queuedJob = await SimulationQueue.enqueueJob({
     userId: testUserId,
     circuitIR: irBell,
@@ -165,7 +185,7 @@ async function runE2EVerification() {
   // Wait 100ms for asynchronous worker processing
   await new Promise((r) => setTimeout(r, 100));
 
-  const completedJob = SimulationQueue.getJob(queuedJob.id, testUserId);
+  const completedJob = await SimulationQueue.getJob(queuedJob.id, testUserId);
   recordTest('QUEUE', 'Job Execution to COMPLETED status', completedJob?.status === 'COMPLETED', `Status: ${completedJob?.status}`);
   recordTest('PERSISTENCE', 'Results stored in database store', !!completedJob?.results_json, `Saved duration: ${completedJob?.duration_ms}ms`);
 
@@ -184,7 +204,7 @@ async function runE2EVerification() {
     shots: 5000,
   });
   // Cancel immediately
-  const cancelSuccess = SimulationQueue.cancelJob(jobToCancel.id, testUserId);
+  const cancelSuccess = await SimulationQueue.cancelJob(jobToCancel.id, testUserId);
   recordTest('FAILURE_HANDLING', 'Job cancellation before or during execution', typeof cancelSuccess === 'boolean', `Cancelled: ${cancelSuccess}`);
 
   // -------------------------------------------------------------------------
@@ -325,6 +345,7 @@ runE2EVerification()
     if (res.failedCount > 0) {
       process.exit(1);
     }
+    process.exit(0);
   })
   .catch((err) => {
     console.error('Fatal test failure:', err);

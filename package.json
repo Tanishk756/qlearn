@@ -1,7 +1,7 @@
 {
-  "name": "react-example",
+  "name": "qlearn-nexus",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx tests/production-persistence.test.ts"
+    "test": "tsx tests/production-persistence.test.ts && tsx tests/multi-user-isolation.test.ts && tsx server/src/tests/run_all_tests.ts && tsx tests/e2e-persistence-verification.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

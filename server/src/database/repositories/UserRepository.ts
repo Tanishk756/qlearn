@@ -22,6 +22,26 @@ export interface UserDTO {
 }
 
 export class UserRepository {
+  public static async listAll(): Promise<UserDTO[]> {
+    try {
+      const rows = await pgDb.select().from(users).orderBy(users.createdAt);
+      return rows.map((u) => ({
+        id: u.id,
+        email: u.email,
+        password_hash: u.passwordHash,
+        name: u.name,
+        username: u.username,
+        role: u.role as any,
+        is_active: u.isActive,
+        is_verified: u.isVerified,
+        created_at: u.createdAt.toISOString(),
+        updated_at: u.updatedAt.toISOString(),
+      }));
+    } catch {
+      return [];
+    }
+  }
+
   public static async findById(id: string): Promise<UserDTO | null> {
     try {
       const rows = await pgDb.select().from(users).where(eq(users.id, id)).limit(1);

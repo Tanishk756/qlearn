@@ -1,11 +1,12 @@
 /**
  * Q-Learn Nexus - Learning Analytics & Telemetry API
  * Records learner engagement events and computes proficiency metrics without storing PII.
+ * Uses PostgreSQL AnalyticsRepository.
  * @license Apache-2.0
  */
 
 import { Router, Response } from 'express';
-import { db, AnalyticsEventRow } from '../database/index';
+import { AnalyticsRepository } from '../database/repositories/AnalyticsRepository';
 import { optionalAuth, AuthenticatedRequest } from '../auth/middleware';
 import crypto from 'crypto';
 
@@ -14,7 +15,7 @@ const router = Router();
 /**
  * POST /api/v1/analytics/event
  */
-router.post('/event', optionalAuth, (req: AuthenticatedRequest, res: Response) => {
+router.post('/event', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
   const { eventType, eventData } = req.body;
   const userId = req.user?.id;
 
@@ -23,16 +24,13 @@ router.post('/event', optionalAuth, (req: AuthenticatedRequest, res: Response) =
     return;
   }
 
-  const row: AnalyticsEventRow = {
-    id: `ev_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
-    user_id: userId,
-    event_type: eventType,
-    event_data: JSON.stringify(eventData || {}),
-    created_at: new Date().toISOString(),
-  };
-
-  db.analyticsEvents.push(row);
-  db.persist();
+  const id = `ev_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+  await AnalyticsRepository.recordEvent({
+    id,
+    userId,
+    eventType,
+    eventData,
+  });
 
   res.status(201).json({ success: true });
 });
@@ -40,27 +38,12 @@ router.post('/event', optionalAuth, (req: AuthenticatedRequest, res: Response) =
 /**
  * GET /api/v1/analytics/summary
  */
-router.get('/summary', optionalAuth, (req: AuthenticatedRequest, res: Response) => {
+router.get('/summary', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.user?.id;
+  const summary = await AnalyticsRepository.getSummary(userId);
 
-  const totalUsers = db.users.size;
-  const totalProjects = db.projects.size;
-  const totalSimulations = db.simulationJobs.size;
-  const totalCompletedLessons = Array.from(db.lessonProgress.values()).filter((p) => p.completed).length;
-
-  res.json({
-    platformStats: {
-      activeLearners: totalUsers,
-      publishedProjects: totalProjects,
-      simulationsExecuted: totalSimulations,
-      lessonsCompleted: totalCompletedLessons,
-    },
-    userStats: userId ? {
-      myCompletedLessons: Array.from(db.lessonProgress.values()).filter((p) => p.user_id === userId && p.completed).length,
-      myProjectsCount: Array.from(db.projects.values()).filter((p) => p.user_id === userId).length,
-      mySimulationsCount: Array.from(db.simulationJobs.values()).filter((p) => p.user_id === userId).length,
-    } : null,
-  });
+  res.json(summary);
 });
 
 export default router;
+

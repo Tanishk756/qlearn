@@ -6,18 +6,18 @@
 
 import { Request, Response, NextFunction } from 'express';
 import { validateSession } from './session';
-import { UserRow } from '../database/index';
+import { UserDTO } from '../database/repositories/UserRepository';
 import { logSecurityEvent } from '../security/auditLogger';
 
 export interface AuthenticatedRequest extends Request {
-  user?: UserRow;
+  user?: UserDTO;
   sessionId?: string;
 }
 
 /**
  * Extracts session token from Authorization Header or Cookie and attaches user to request.
  */
-export function authenticateToken(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
+export async function authenticateToken(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
   let token = '';
 
@@ -35,7 +35,7 @@ export function authenticateToken(req: AuthenticatedRequest, res: Response, next
     return;
   }
 
-  const result = validateSession(token);
+  const result = await validateSession(token);
   if (!result) {
     res.status(401).json({
       error: 'INVALID_OR_EXPIRED_SESSION',
@@ -52,7 +52,7 @@ export function authenticateToken(req: AuthenticatedRequest, res: Response, next
 /**
  * Optional authentication: attaches user if token is valid, but does not block unauthenticated requests.
  */
-export function optionalAuth(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
+export async function optionalAuth(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
   let token = '';
 
@@ -63,7 +63,7 @@ export function optionalAuth(req: AuthenticatedRequest, res: Response, next: Nex
   }
 
   if (token) {
-    const result = validateSession(token);
+    const result = await validateSession(token);
     if (result) {
       req.user = result.user;
       req.sessionId = result.session.id;

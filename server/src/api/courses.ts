@@ -1,11 +1,12 @@
 /**
  * Q-Learn Nexus - Courses & Learning Progress API
  * Curriculum browsing, lesson progress tracking, and interactive quiz submissions.
+ * Uses PostgreSQL CourseRepository.
  * @license Apache-2.0
  */
 
 import { Router, Response } from 'express';
-import { db, LessonProgressRow, QuizAttemptRow } from '../database/index';
+import { CourseRepository } from '../database/repositories/CourseRepository';
 import { authenticateToken, optionalAuth, AuthenticatedRequest } from '../auth/middleware';
 import { NotificationDispatcher } from '../notifications/dispatcher';
 import crypto from 'crypto';
@@ -15,37 +16,38 @@ const router = Router();
 /**
  * GET /api/v1/courses
  */
-router.get('/', optionalAuth, (req: AuthenticatedRequest, res: Response) => {
-  const coursesList = [];
+router.get('/', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
   const currentUserId = req.user?.id;
+  const isInstructorOrAdmin = req.user?.role === 'ADMIN' || req.user?.role === 'INSTRUCTOR';
 
-  for (const course of db.courses.values()) {
-    if (course.published || course.is_published || req.user?.role === 'ADMIN' || req.user?.role === 'INSTRUCTOR') {
-      const lessons = Array.from(db.lessons.values())
-        .filter((l) => l.course_id === course.id)
-        .sort((a, b) => a.order_index - b.order_index)
-        .map((l) => {
-          const progress = currentUserId ? db.lessonProgress.get(`${currentUserId}_${l.id}`) : null;
-          return {
-            id: l.id,
-            title: l.title,
-            description: l.description,
-            orderIndex: l.order_index,
-            xp: l.xp || 50,
-            completed: progress ? progress.completed : false,
-          };
-        });
+  const coursesList = [];
+  const allCourses = await CourseRepository.listCourses(isInstructorOrAdmin);
+  const userProgressList = currentUserId ? await CourseRepository.getUserLessonProgress(currentUserId) : [];
+  const completedLessonMap = new Map<string, boolean>();
+  for (const p of userProgressList) {
+    if (p.completed) completedLessonMap.set(p.lessonId, true);
+  }
 
-      coursesList.push({
-        id: course.id,
-        title: course.title,
-        description: course.description,
-        difficulty: course.difficulty || course.level || 'Beginner',
-        category: course.category || 'Fundamentals',
-        totalLessons: lessons.length,
-        lessons,
-      });
-    }
+  for (const course of allCourses) {
+    const courseLessons = await CourseRepository.getLessonsForCourse(course.id);
+    const lessons = courseLessons.map((l) => ({
+      id: l.id,
+      title: l.title,
+      description: l.description,
+      orderIndex: l.orderIndex,
+      xp: l.xp || 50,
+      completed: !!completedLessonMap.get(l.id),
+    }));
+
+    coursesList.push({
+      id: course.id,
+      title: course.title,
+      description: course.description,
+      difficulty: course.difficulty || course.level || 'Beginner',
+      category: course.category || 'Fundamentals',
+      totalLessons: lessons.length,
+      lessons,
+    });
   }
 
   res.json({ success: true, courses: coursesList });
@@ -54,32 +56,33 @@ router.get('/', optionalAuth, (req: AuthenticatedRequest, res: Response) => {
 /**
  * GET /api/v1/courses/:courseId/lessons/:lessonId
  */
-router.get('/:courseId/lessons/:lessonId', optionalAuth, (req: AuthenticatedRequest, res: Response) => {
+router.get('/:courseId/lessons/:lessonId', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
   const { lessonId } = req.params;
-  const lesson = db.lessons.get(lessonId);
+  const currentUserId = req.user?.id;
 
-  if (!lesson) {
+  const result = await CourseRepository.getLessonWithDetails(lessonId, currentUserId);
+
+  if (!result || !result.lesson) {
     res.status(404).json({ error: 'NOT_FOUND', message: 'Lesson not found' });
     return;
   }
 
-  const quizzes = Array.from(db.quizzes.values()).filter((q) => q.lesson_id === lessonId);
-  const userProgress = req.user ? db.lessonProgress.get(`${req.user.id}_${lessonId}`) : null;
+  const { lesson, quizzes, progress } = result;
 
   res.json({
     lesson: {
       id: lesson.id,
-      courseId: lesson.course_id,
+      courseId: lesson.courseId,
       title: lesson.title,
       description: lesson.description,
       content: lesson.content,
-      orderIndex: lesson.order_index,
+      orderIndex: lesson.orderIndex,
       xp: lesson.xp || 50,
-      completed: userProgress ? userProgress.completed : false,
+      completed: progress ? progress.completed : false,
       quizzes: quizzes.map((q) => ({
         id: q.id,
         question: q.question,
-        options: JSON.parse(q.options_json),
+        options: JSON.parse(q.optionsJson || '[]'),
         explanation: q.explanation,
       })),
     },
@@ -92,43 +95,24 @@ router.get('/:courseId/lessons/:lessonId', optionalAuth, (req: AuthenticatedRequ
 router.post('/:courseId/lessons/:lessonId/complete', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   const { lessonId } = req.params;
   const userId = req.user!.id;
-  const lesson = db.lessons.get(lessonId);
+  const lesson = await CourseRepository.getLesson(lessonId);
 
   if (!lesson) {
     res.status(404).json({ error: 'NOT_FOUND', message: 'Lesson not found' });
     return;
   }
 
-  const key = `${userId}_${lessonId}`;
-  let progress = db.lessonProgress.get(key);
-
   const xpEarned = lesson.xp || 50;
+  await CourseRepository.markLessonComplete(userId, lessonId);
 
-  if (!progress) {
-    progress = {
-      id: `lp_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
-      user_id: userId,
-      lesson_id: lessonId,
-      completed: true,
-      completed_at: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-    };
-    db.lessonProgress.set(key, progress);
-    db.persist();
-
-    // Send notification
-    await NotificationDispatcher.dispatch({
-      userId,
-      type: 'COURSE_COMPLETED',
-      title: 'Lesson Completed!',
-      message: `You earned +${xpEarned} XP by completing "${lesson.title}".`,
-      actionLink: `/learn`,
-    });
-  } else {
-    progress.completed = true;
-    progress.completed_at = new Date().toISOString();
-    db.persist();
-  }
+  // Send notification
+  await NotificationDispatcher.dispatch({
+    userId,
+    type: 'COURSE_COMPLETED',
+    title: 'Lesson Completed!',
+    message: `You earned +${xpEarned} XP by completing "${lesson.title}".`,
+    actionLink: `/learn`,
+  });
 
   res.json({ success: true, message: 'Progress saved successfully.', xpEarned });
 });
@@ -141,25 +125,23 @@ router.post('/quizzes/:quizId/submit', authenticateToken, async (req: Authentica
   const { selectedOptionIndex } = req.body;
   const userId = req.user!.id;
 
-  const quiz = db.quizzes.get(quizId);
+  const quiz = await CourseRepository.getQuiz(quizId);
   if (!quiz) {
     res.status(404).json({ error: 'NOT_FOUND', message: 'Quiz question not found' });
     return;
   }
 
-  const isCorrect = selectedOptionIndex === quiz.correct_option_index;
-  const attemptRow: QuizAttemptRow = {
-    id: `qa_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
-    user_id: userId,
-    quiz_id: quizId,
-    selected_option_index: selectedOptionIndex,
-    is_correct: isCorrect,
-    score: isCorrect ? 100 : 0,
-    created_at: new Date().toISOString(),
-  };
+  const isCorrect = selectedOptionIndex === quiz.correctOptionIndex;
+  const attemptId = `qa_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 
-  db.quizAttempts.push(attemptRow);
-  db.persist();
+  await CourseRepository.recordQuizAttempt({
+    id: attemptId,
+    userId,
+    quizId,
+    selectedOptionIndex,
+    isCorrect,
+    score: isCorrect ? 100 : 0,
+  });
 
   if (isCorrect) {
     await NotificationDispatcher.dispatch({
@@ -174,9 +156,10 @@ router.post('/quizzes/:quizId/submit', authenticateToken, async (req: Authentica
   res.json({
     success: true,
     isCorrect,
-    correctOptionIndex: quiz.correct_option_index,
+    correctOptionIndex: quiz.correctOptionIndex,
     explanation: quiz.explanation,
   });
 });
 
 export default router;
+
